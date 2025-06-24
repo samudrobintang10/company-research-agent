@@ -249,7 +249,7 @@ Strictly enforce this EXACT document structure:
 ## News
 [News content with ### subsections]
 
-Return the report in clean markdown format. No explanations or commentary."""
+Return the report using Bahasa Indonesia and in clean markdown format. No explanations or commentary."""
         
         try:
             response = await self.openai_client.chat.completions.create(
