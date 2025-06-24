@@ -4,27 +4,25 @@ from typing import Any, Dict
 
 from langchain_core.messages import AIMessage
 from openai import AsyncOpenAI
+from backend.services.bjb_postgres_client import get_connection
+from psycopg2.extras import RealDictCursor
 
 from ..classes import ResearchState
 from ..utils.references import format_references_section
+from backend.services.bjb_postgres_client import get_recommended_products
 
 logger = logging.getLogger(__name__)
 
-
-
-
 class Editor:
     """Compiles individual section briefings into a cohesive final report."""
-    
+
     def __init__(self) -> None:
         self.openai_key = os.getenv("OPENAI_API_KEY")
         if not self.openai_key:
             raise ValueError("OPENAI_API_KEY environment variable is not set")
-        
-        # Configure OpenAI
+
         self.openai_client = AsyncOpenAI(api_key=self.openai_key)
-        
-        # Initialize context dictionary for use across methods
+
         self.context = {
             "company": "Unknown Company",
             "industry": "Unknown",
@@ -32,27 +30,20 @@ class Editor:
         }
 
     async def compile_briefings(self, state: ResearchState) -> ResearchState:
-        """Compile individual briefing categories from state into a final report."""
         company = state.get('company', 'Unknown Company')
-        
-        # Update context with values from state
         self.context = {
             "company": company,
             "industry": state.get('industry', 'Unknown'),
             "hq_location": state.get('hq_location', 'Unknown')
         }
-        
-        # Send initial compilation status
+
         if websocket_manager := state.get('websocket_manager'):
             if job_id := state.get('job_id'):
                 await websocket_manager.send_status_update(
                     job_id=job_id,
                     status="processing",
                     message=f"Starting report compilation for {company}",
-                    result={
-                        "step": "Editor",
-                        "substep": "initialization"
-                    }
+                    result={"step": "Editor", "substep": "initialization"}
                 )
 
         context = {
@@ -60,10 +51,8 @@ class Editor:
             "industry": state.get('industry', 'Unknown'),
             "hq_location": state.get('hq_location', 'Unknown')
         }
-        
+
         msg = [f"📑 Compiling final report for {company}..."]
-        
-        # Pull individual briefings from dedicated state keys
         briefing_keys = {
             'company': 'company_briefing',
             'industry': 'industry_briefing',
@@ -71,17 +60,13 @@ class Editor:
             'news': 'news_briefing'
         }
 
-        # Send briefing collection status
         if websocket_manager := state.get('websocket_manager'):
             if job_id := state.get('job_id'):
                 await websocket_manager.send_status_update(
                     job_id=job_id,
                     status="processing",
                     message="Collecting section briefings",
-                    result={
-                        "step": "Editor",
-                        "substep": "collecting_briefings"
-                    }
+                    result={"step": "Editor", "substep": "collecting_briefings"}
                 )
 
         individual_briefings = {}
@@ -92,7 +77,7 @@ class Editor:
             else:
                 msg.append(f"No {category} briefing available")
                 logger.error(f"Missing state key: {key}")
-        
+
         if not individual_briefings:
             msg.append("\n⚠️ No briefing sections available to compile")
             logger.error("No briefings found in state")
@@ -107,23 +92,17 @@ class Editor:
                 logger.error(f"Error during report compilation: {e}")
         state.setdefault('messages', []).append(AIMessage(content="\n".join(msg)))
         return state
-    
+
     async def edit_report(self, state: ResearchState, briefings: Dict[str, str], context: Dict[str, Any]) -> str:
-        """Compile section briefings into a final report and update the state."""
         try:
             company = self.context["company"]
-            
-            # Step 1: Initial Compilation
             if websocket_manager := state.get('websocket_manager'):
                 if job_id := state.get('job_id'):
                     await websocket_manager.send_status_update(
                         job_id=job_id,
                         status="processing",
                         message="Compiling initial research report",
-                        result={
-                            "step": "Editor",
-                            "substep": "compilation"
-                        }
+                        result={"step": "Editor", "substep": "compilation"}
                     )
 
             edited_report = await self.compile_content(state, briefings, company)
@@ -131,51 +110,131 @@ class Editor:
                 logger.error("Initial compilation failed")
                 return ""
 
-            # Step 2: Deduplication and Cleanup
             if websocket_manager := state.get('websocket_manager'):
                 if job_id := state.get('job_id'):
                     await websocket_manager.send_status_update(
                         job_id=job_id,
                         status="processing",
                         message="Cleaning up and organizing report",
-                        result={
-                            "step": "Editor",
-                            "substep": "cleanup"
-                        }
+                        result={"step": "Editor", "substep": "cleanup"}
                     )
 
-            # Step 3: Formatting Final Report
             if websocket_manager := state.get('websocket_manager'):
                 if job_id := state.get('job_id'):
                     await websocket_manager.send_status_update(
                         job_id=job_id,
                         status="processing",
                         message="Formatting final report",
-                        result={
-                            "step": "Editor",
-                            "substep": "format"
-                        }
+                        result={"step": "Editor", "substep": "format"}
                     )
+
             final_report = await self.content_sweep(state, edited_report, company)
-            
             final_report = final_report or ""
-            
+
             logger.info(f"Final report compiled with {len(final_report)} characters")
             if not final_report.strip():
                 logger.error("Final report is empty!")
                 return ""
-            
+
             logger.info("Final report preview:")
             logger.info(final_report[:500])
-            
-            # Update state with the final report in two locations
+
+            # === Mulai tambahan: Produk Bank BJB dengan Reason dari AI ===
+            recommended_section = ""
+            try:
+                with get_connection() as conn:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                        cursor.execute("SELECT * FROM products WHERE deleted_at IS NULL")
+                        all_products = cursor.fetchall()
+
+                name_to_product = {p['name']: p for p in all_products}
+                mandatory_names = {
+                    "Giro Korporasi", 
+                    "Deposito Korporasi", 
+                    "Payroll Service", 
+                    "Internet Banking Corporate"
+                }
+                pairing = {
+                    "bjb Kredit Investasi": "bjb Kredit Modal Kerja",
+                    "bjb Kredit Modal Kerja": "bjb Kredit Investasi"
+                }
+
+                # Siapkan daftar produk yang akan dipilih AI
+                product_context = "\n".join([
+                    f"- {p['name']}: {p.get('description', '')} {p.get('notes', '')}".strip()
+                    for p in all_products
+                ])
+
+                # Prompt ke AI untuk memilih produk dan memberikan alasan
+                product_prompt = f"""
+Kamu adalah asisten cerdas dari Bank BJB. Berdasarkan profil perusahaan berikut ini, pilih produk yang relevan untuk ditawarkan.
+
+## Profil Perusahaan:
+Nama: {self.context['company']}
+Industri: {self.context['industry']}
+Lokasi Kantor Pusat: {self.context['hq_location']}
+
+## Ringkasan Riset:
+{edited_report}
+
+## Daftar Produk:
+{product_context}
+
+## Instruksi:
+1. Jangan rekomendasikan produk apapun jika perusahaan ini dinyatakan bangkrut atau dalam status pailit.
+2. Jika perusahaan termasuk kategori UMKM atau bukan badan usaha (seperti individu, toko kecil, atau usaha rumahan), maka jangan tawarkan produk berikut:
+   - Giro Korporasi
+   - Deposito Korporasi
+   - Payroll Service
+   - Internet Banking Corporate
+3. Jika perusahaan termasuk kategori perusahaan menengah atau besar, selalu tawarkan keempat produk di atas.
+4. Jika kamu memilih 'bjb Kredit Investasi', maka 'bjb Kredit Modal Kerja' juga harus disertakan (dan sebaliknya).
+5. Pilih produk dari daftar yang relevan dan berikan alasan rekomendasi berdasarkan profil perusahaan dan hasil riset.
+6. Gunakan format markdown seperti berikut:
+   - **1. [Nama Produk]**
+     Alasan mengapa produk ini cocok.
+     Potensi yang bisa didapatkan.
+     Notes/catatan terkait produk ini.
+     Aksi yang harus dilakukan oleh tim Bank BJB.
+     Alasan mengapa perusahaan ini penting untuk diraih oleh Bank BJB.
+     [Pelajari lebih lanjut](link produk)
+7. Jangan tampilkan produk yang tidak relevan untuk ditawarkan.
+8. Balas hanya dalam format markdown. Jangan beri penjelasan tambahan di luar struktur yang diminta.
+
+Balas hanya dengan format markdown.
+"""
+
+                response = await self.openai_client.chat.completions.create(
+                    model="gpt-4.1",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "Kamu adalah AI assistant untuk bank yang bertugas menyarankan produk berdasarkan analisis riset perusahaan."
+                        },
+                        {
+                            "role": "user",
+                            "content": product_prompt
+                        }
+                    ],
+                    temperature=0.3,
+                )
+
+                recommended_section = "## Rekomendasi Produk Bank BJB\n\n" + response.choices[0].message.content.strip()
+
+            except Exception as e:
+                logger.error(f"Gagal memuat rekomendasi produk AI: {e}")
+
+            if "## References" in final_report and recommended_section:
+                final_report = final_report.replace("## References", f"{recommended_section}\n\n## References")
+            # === Selesai tambahan ===
+
             state['report'] = final_report
             state['status'] = "editor_complete"
+
             if 'editor' not in state or not isinstance(state['editor'], dict):
                 state['editor'] = {}
             state['editor']['report'] = final_report
-            logger.info(f"Report length in state: {len(state.get('report', ''))}")
-            
+
             if websocket_manager := state.get('websocket_manager'):
                 if job_id := state.get('job_id'):
                     await websocket_manager.send_status_update(
@@ -190,7 +249,7 @@ class Editor:
                             "status": "completed"
                         }
                     )
-            
+
             return final_report
         except Exception as e:
             logger.error(f"Error in edit_report: {e}")
