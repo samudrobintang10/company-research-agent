@@ -7,13 +7,8 @@ from langchain_core.messages import AIMessage
 from openai import AsyncOpenAI
 from backend.services.bjb_postgres_client import get_connection
 from psycopg2.extras import RealDictCursor
-
-from backend.services.bjb_postgres_client import get_connection
-from psycopg2.extras import RealDictCursor
-
 from ..classes import ResearchState
 from ..utils.references import format_references_section
-from backend.services.bjb_postgres_client import get_recommended_products
 
 logger = logging.getLogger(__name__)
 
