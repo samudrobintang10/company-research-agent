@@ -6,6 +6,7 @@ import ResearchQueries from './components/ResearchQueries';
 import ResearchStatus from './components/ResearchStatus';
 import ResearchReport from './components/ResearchReport';
 import ResearchForm from './components/ResearchForm';
+import RecommendedProducts from './components/RecommendedProducts';
 import {ResearchOutput, DocCount,DocCounts, EnrichmentCounts, ResearchState, ResearchStatusType} from './types';
 import { checkForFinalReport } from './utils/handlers';
 import { colorAnimation, dmSansStyle, glassStyle, fadeInAnimation } from './styles';
@@ -764,6 +765,13 @@ function App() {
           onGeneratePdf={handleGeneratePdf}
         />
       );
+
+        const recommended = (output.details as any).recommended_products || [];
+        if (recommended.length > 0) {
+          components.push(
+            <RecommendedProducts key="recommended" products={recommended} />
+          );
+        }
     }
 
     // Current phase component
@@ -822,7 +830,7 @@ function App() {
   return (
     <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-white via-gray-50 to-white p-8 relative">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_1px_1px,rgba(70,139,255,0.35)_1px,transparent_0)] bg-[length:24px_24px] bg-center"></div>
-      <div className="max-w-5xl mx-auto space-y-8 relative">
+      <div className="relative max-w-5xl mx-auto space-y-8">
         {/* Header Component */}
         <Header glassStyle={glassStyle.card} />
 
