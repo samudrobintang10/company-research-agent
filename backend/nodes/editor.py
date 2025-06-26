@@ -1,9 +1,13 @@
+import json
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 
 from langchain_core.messages import AIMessage
 from openai import AsyncOpenAI
+
+from backend.services.bjb_postgres_client import get_connection
+from psycopg2.extras import RealDictCursor
 
 from ..classes import ResearchState
 from ..utils.references import format_references_section
@@ -99,16 +103,16 @@ class Editor:
         else:
             try:
                 compiled_report = await self.edit_report(state, individual_briefings, context)
-                if not compiled_report or not compiled_report.strip():
+                if not compiled_report:
                     logger.error("Compiled report is empty!")
                 else:
-                    logger.info(f"Successfully compiled report with {len(compiled_report)} characters")
+                    logger.info(f"Successfully compiled report")
             except Exception as e:
                 logger.error(f"Error during report compilation: {e}")
         state.setdefault('messages', []).append(AIMessage(content="\n".join(msg)))
         return state
     
-    async def edit_report(self, state: ResearchState, briefings: Dict[str, str], context: Dict[str, Any]) -> str:
+    async def edit_report(self, state: ResearchState, briefings: Dict[str, str], context: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
         """Compile section briefings into a final report and update the state."""
         try:
             company = self.context["company"]
@@ -159,7 +163,7 @@ class Editor:
             final_report = await self.content_sweep(state, edited_report, company)
             
             final_report = final_report or ""
-            
+
             logger.info(f"Final report compiled with {len(final_report)} characters")
             if not final_report.strip():
                 logger.error("Final report is empty!")
@@ -175,6 +179,24 @@ class Editor:
                 state['editor'] = {}
             state['editor']['report'] = final_report
             logger.info(f"Report length in state: {len(state.get('report', ''))}")
+
+            product_recommendation = []
+            try:
+                with get_connection() as conn:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                        cursor.execute("SELECT * FROM products WHERE deleted_at IS NULL")
+                        all_products = cursor.fetchall()
+
+                product_context = "\n".join([
+                    f"- [ID: {p['id']}] {p['name']}\n  Deskripsi: {p.get('description', '-')}\n  Catatan: {p.get('note', '-')}\n  Prioritas: {p.get('priority', '-')}\n  Link: {p.get('link', '-')}\n"
+                    for p in all_products
+                ])
+                recommendation_json_str = await self.generate_product_recommendation_json(context, final_report, product_context)
+                product_recommendation = json.loads(recommendation_json_str)
+                state['product_recommendation'] = product_recommendation
+            except Exception as e:
+                logger.error(f"Gagal memuat atau parse rekomendasi produk AI: {e}")
+                state['product_recommendation'] = []
             
             if websocket_manager := state.get('websocket_manager'):
                 if job_id := state.get('job_id'):
@@ -187,14 +209,68 @@ class Editor:
                             "report": final_report,
                             "company": company,
                             "is_final": True,
-                            "status": "completed"
+                            "status": "completed",
+                            "product_recommendation": product_recommendation
                         }
                     )
             
-            return final_report
+            return final_report, product_recommendation
         except Exception as e:
             logger.error(f"Error in edit_report: {e}")
             return ""
+        
+    async def generate_product_recommendation_json(self, context: Dict[str, Any], final_report: str, product_context: str) -> str:
+        prompt = f"""
+Kamu adalah asisten cerdas dari Bank BJB. Berdasarkan profil perusahaan berikut ini, pilih produk yang relevan untuk ditawarkan.
+
+## Profil Perusahaan:
+Nama: {context['company']}
+Industri: {context['industry']}
+Lokasi Kantor Pusat: {context['hq_location']}
+
+## Ringkasan Riset:
+{final_report}
+
+## Daftar Produk:
+{product_context}
+
+## Instruksi:
+1. Jika perusahaan ini dinyatakan bangkrut, pailit, sedang dalam proses likuidasi, atau tidak beroperasi lagi, maka JANGAN rekomendasikan produk apapun. Langsung balas dengan array kosong: []
+2. Jika perusahaan termasuk kategori UMKM atau bukan badan usaha (seperti individu, toko kecil, atau usaha rumahan), maka JANGAN tawarkan produk berikut:
+   - Giro Korporasi
+   - Deposito Korporasi
+   - Payroll Service
+   - Internet Banking Corporate
+3. Jika perusahaan termasuk kategori perusahaan menengah atau besar, SELALU tawarkan keempat produk di atas tetapi jangan hanya itu saja, tawarkan yang lainnya juga (sebanyak-banyaknya) jika memang cocok.
+4. Jika kamu memilih 'bjb Kredit Investasi', maka 'bjb Kredit Modal Kerja' juga HARUS disertakan (dan sebaliknya).
+5. Pilih produk dari daftar yang relevan dan berikan rekomendasi dalam format JSON.
+6. Gunakan struktur JSON seperti di bawah. **Isi `product_id` hanya dengan nilai ID numerik (angka integer) yang tersedia di daftar produk (yaitu `product.id`) — JANGAN MENGARANG.**
+7. Struktur JSON:
+[
+  {{
+    "product_id": 1,  // HARUS sama persis dengan ID produk di daftar
+    "product_name": "Nama produk",
+    "reason": "Jelaskan alasan produk ini cocok dan mengapa perusahaan ini penting bagi Bank BJB.",
+    "potential": "Tuliskan potensi bisnis yang bisa didapatkan dari perusahaan ini",
+    "reminder_notes": "Tambahkan catatan atau link terkait produk ini (jika ada) berdasarkan NOTES",
+    "action": "Langkah yang perlu dilakukan tim Bank BJB terhadap perusahaan ini"
+  }}
+]
+8. Hanya tampilkan produk yang benar-benar relevan.
+9. Jangan tampilkan produk yang tidak relevan atau tidak ada di daftar produk.
+10. Jangan menambahkan penjelasan lain di luar format JSON.
+11. Balas hanya dalam format JSON. Tanpa markdown, tanpa komentar, dan tanpa teks di luar JSON.
+"""
+
+        response = await self.openai_client.chat.completions.create(
+            model="gpt-4.1",
+            messages=[
+                {"role": "system", "content": "Kamu adalah AI assistant untuk bank yang bertugas menyarankan produk berdasarkan analisis riset perusahaan."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3
+        )
+        return response.choices[0].message.content.strip()
     
     async def compile_content(self, state: ResearchState, briefings: Dict[str, str], company: str) -> str:
         """Initial compilation of research sections."""
